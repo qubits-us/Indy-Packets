@@ -1,5 +1,5 @@
 # Indy-Packets
-Cross platform tcp packet client using Indy
+Cross platform tcp packet client and server using Indy
 
 Testing my Indy Packet Client for Android.
 
