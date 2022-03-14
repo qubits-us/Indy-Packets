@@ -4,19 +4,86 @@ interface
 
 uses
   Classes,SyncObjs,SysUtils,System.Generics.Collections,
-  IdGlobal,IdContext,IdBaseComponent,IdComponent,IdCustomTCPServer,IdTCPServer,IdExceptionCore,
-  uPacketDefs;
+  IdGlobal,IdContext,IdBaseComponent,IdComponent,IdCustomTCPServer,IdTCPServer,IdUdpServer,IdSocketHandle,IdExceptionCore,
+  uPacketDefs
+  {$IFDEF ANDROID},androidapi.JNI.Net,Androidapi.JNIBridge, Androidapi.Jni,
+    androidapi.JNI.JavaTypes,androidapi.JNI.Os,FMX.Helpers.Android,Androidapi.Helpers,
+     Androidapi.Jni.GraphicsContentViewText {$ENDIF};
 
 type
   TComms_Event  = procedure (Sender:TObject) of object;
   TComms_Error  = procedure (Sender:TObject;const aMsg:String) of object;
-  TComms_Status = procedure (Sender: TObject; const AStatus: TIdStatus) of object;
+  TComms_Status = procedure (Sender: TObject; const AStatus: String) of object;
 
-  type
-    tPacketData = record
-      DataType:byte;
-      Data:tBytes;
-    end;
+
+
+
+//data stored in q's
+ type
+  tPacketData = record
+   DataType:byte;
+   Data:tBytes;
+ end;
+
+
+
+
+
+
+   //sends udp broadcast packets, auto configures clients
+   type
+      TDiscoveryThread= class(TThread)
+        private
+            fUdp:TIdUDPServer;
+            fLock:TCriticalSection;
+            fErrorEvent:TComms_Error;
+            fPauseEvent:TEvent;
+            fDiscvEvent:TEvent;
+            fLastError:String;
+            fPaused:boolean;
+            fPort:integer;
+            fCount:integer;
+            fSrvName:String;
+            fSrvIP:String;
+            fSrvPort:Integer;
+            fBurp:boolean;
+            fDiscvSent:integer;
+            procedure SetDiscvSent(aValue:integer);
+            function  GetDiscvSent:integer;
+            procedure IncDiscvSent;
+            function  GetBurp:boolean;
+            procedure SetBurp(aValue:boolean);
+            function  GetPort:integer;
+            procedure SetPort(aValue:integer);
+            procedure SetPause(const aValue:Boolean);
+            function  GetPause:boolean;
+            procedure SetServerIp(aValue:String);
+            function  GetServerIP:String;
+            procedure SetServerPort(aValue:integer);
+            function  GetServerPort:integer;
+            procedure SetServerName(aValue:String);
+            function  GetServerName:String;
+            procedure OnUDPError(AThread: TIdUDPListenerThread; ABinding: TIdSocketHandle;const AMessage: string; const AExceptionClass: TClass);
+            function  CheckPacketIdent(Const AIdent:TIdentArray):boolean;
+            function  BytesToStr(const aBytes:Array of byte):string;
+            procedure Burp;
+
+         protected
+             procedure Execute;override;
+             procedure DoErrorMsg;
+         public
+             Constructor Create(aLock:TCriticalSection);
+             destructor  Destroy;override;
+             property    OnError:TComms_Error read fErrorEvent write fErrorEvent;
+             property    Paused:boolean read GetPause write SetPause;
+             property    Port:integer read GetPort write SetPort;
+             property    ServerPort:integer read GetServerPort;
+             property    ServerIP:string read GetServerIP;
+             property    ServerName:String read GetServerName write SetServerName;
+             property    DoBurp:boolean read GetBurp write SetBurp;
+             property    DiscvSent:integer read GetDiscvSent;
+      end;
+
 
 
 
@@ -53,15 +120,29 @@ type
      tPacketServer = Class(tObject)
        private
         fCrit:tCriticalSection;
+        fLogQue:tQueue<string>;
+        fErrorQue:tQueue<string>;
         fServer: TIdTCPServer;
         fIp:string;
         fLastError:string;
+        fLastStatus:string;
         fPort:integer;
         fRecv:integer;
         fSent:integer;
         fBad:integer;
-        fCommsError:TComms_Error;
+        fCommsError:TComms_event;
+        fStatus:tComms_Status;
+        fLogEvent:tComms_event;
+        fDiscvThrd:TDiscoveryThread;//discovery
 
+    {$IFDEF ANDROID}
+        fWifiLockEngaged:boolean;
+        fWifiManager:JWifiManager;
+        fMultiCastLock:JWifiManager_MulticastLock;
+        function GetWiFiManager: JWiFiManager;
+        procedure GetWifiLock;
+        procedure ReleaseWifiLock;
+    {$ENDIF}
         function  GetConnCount:integer;
         function  GetBad:integer;
         procedure IncBad;
@@ -69,6 +150,8 @@ type
         procedure IncSent;
         function  GetRecv:integer;
         procedure IncRecv;
+        procedure Log(aMsg:String);
+        procedure LogError(aMsg:String);
         procedure OnConnect(AContext: TIdContext);
         procedure OnContextCreated(AContext: TIdContext);
         procedure OnDisconnect(AContext: TIdContext);
@@ -80,13 +163,21 @@ type
         procedure piRecvNOP(aPacket:tPacketContext);
         function  IsOnline:boolean;
 
+
        public
         Constructor Create;
-        Destructor Destroy;override;
-        procedure  DoError;
-        procedure  Start;
-        procedure  Stop;
-        property OnError:tComms_error read fCommsError write fCommsError;
+        Destructor  Destroy;override;
+        procedure   DoError;
+        procedure   DoStatus;
+        procedure   DoLog;
+        function    PopLog:string;
+        function    PopErrorLog:string;
+        procedure   Start;
+        procedure   Stop;
+
+        property OnError:tComms_event read fCommsError write fCommsError;
+        property OnState:tComms_Status read fStatus write fStatus;
+        property OnLog:tComms_event read fLogEvent write fLogEvent;
         property Port:integer read fPort write fPort;
         property IP:string read fIP write fIP;
         property Online:boolean read IsOnline;
@@ -103,6 +194,384 @@ type
 
 
 implementation
+
+
+
+{TDiscoveryThread}
+constructor TDiscoveryThread.Create(aLock: TCriticalSection);
+begin
+  fLock:=aLock;
+  fPaused:=true;
+  fPort:=6000;
+  fSrvIP:='192.168.0.55';
+  fSrvPort:=9000;
+  fSrvName:='SRV1';
+  fBurp:=false;
+  fCount:=0;
+
+  fPauseEvent:=tEvent.Create(nil,true, false,'');
+  fDiscvEvent:=tEvent.Create(nil,true,false,'');
+  try
+  fUdp:=TIDUDPServer.Create(nil);
+  fUdp.DefaultPort:=fPort;
+  FUdp.BroadcastEnabled:=true;
+  fUdp.OnUDPException:=OnUdpError;
+  fUdp.ThreadedEvent:=true;
+  finally
+    ;
+  end;
+
+  inherited Create(false);
+
+end;
+
+//clean house!!
+destructor TDiscoveryThread.Destroy;
+begin
+  //kill the udp socket srvr
+  if Assigned(fUdp) then
+    begin
+     if fUdp.Active then fUdp.Active:=false;
+     try
+       fUdp.Free;
+      finally
+       ;
+     end;
+    end;
+
+  Terminate;//shut down please
+  fPauseEvent.SetEvent;//release it..
+  FDiscvEvent.SetEvent;//release it..
+  //might already be done..
+  if not Finished then WaitFor;//no hang ups please gods!!
+  fPauseEvent.Free;//bye
+  fDiscvEvent.Free;//bye
+  fLock:=nil;//remove ref
+  inherited;// and everything else..
+
+end;
+
+//excuse me.. :)
+procedure TDiscoveryThread.Burp;
+var
+aPacket:TDiscoveryPacket;
+aBytes:tBytes;
+aBuff:TIdBytes;
+begin
+
+
+  //try to broadcast a discovery packet
+   FillPacketIdent(aPacket.PacketIdent);
+   //server name
+   aBytes:=TEncoding.ANSI.GetBytes(fSrvName);
+   if (Length(aBytes)>0) AND (Length(aBytes)<Length(aPAcket.ServerName)) then
+   Move(aBytes[0],aPacket.ServerName[0],Length(aBytes)) else
+   aPacket.ServerName[0]:=0;
+   //server ip
+   aBytes:=TEncoding.ANSI.GetBytes(fSrvIP);
+   if (Length(aBytes)>0) AND (Length(aBytes)<Length(aPacket.ServerIP)) then
+   Move(aBytes[0],aPacket.ServerIP[0],Length(aBytes)) else
+   aPacket.ServerIp[0]:=0;
+  //server port
+   aBytes:=TEncoding.ANSI.GetBytes(IntToStr(fSrvPort));
+   if (Length(aBytes)>0) AND (Length(aBytes)<Length(aPacket.ServerPort)) then
+   Move(aBytes[0],aPacket.ServerPort[0],Length(aBytes)) else
+   aPacket.ServerPort[0]:=0;
+
+  SetLength(aBytes,0);//all done with this..
+   //take me struct and stuff it into an indy buff..
+   SetLength(aBuff,SizeOf(aPacket));
+   Move(aPacket,aBuff[0],SizeOf(aPacket));
+ try
+  fUdp.Broadcast(aBuff,fUdp.DefaultPort);
+  IncDiscvSent;
+  except on e:Exception do
+    begin
+     fLastError:='Burp Error: '+e.Message;
+     Synchronize(DoErrorMsg);
+    end;
+ end;
+  SetLength(aBuff,0);//bye
+end;
+
+//do we burp out a broadcast packet when active set to true..
+//might open things up if stuck.. don't seem to need it..
+procedure TDiscoveryThread.SetBurp(aValue: Boolean);
+begin
+  fLock.Enter;
+  try
+    fBurp:=aValue;
+  finally
+  fLock.Leave;
+
+  end;
+end;
+
+//get the burp
+function TDiscoveryThread.GetBurp:boolean;
+begin
+fLock.Enter;
+try
+    result:=fBurp;
+finally
+fLock.Leave;
+
+end;
+
+end;
+
+
+//how many discv packets recvs
+procedure TDiscoveryThread.SetDiscvSent(aValue: Integer);
+begin
+  fLock.Enter;
+  try
+    fDiscvSent:=aValue;
+  finally
+  fLock.Leave;
+
+  end;
+end;
+// get em
+function TDiscoveryThread.GetDiscvSent;
+begin
+  fLock.Enter;
+  try
+    result:=fDiscvSent;
+  finally
+  fLock.Leave;
+
+  end;
+end;
+// inc em
+procedure TDiscoveryThread.IncDiscvSent;
+begin
+  fLock.Enter;
+  try
+    Inc(fDiscvSent);
+  finally
+  fLock.Leave;
+
+  end;
+end;
+
+
+
+
+
+
+// the port we use
+procedure TDiscoveryThread.SetPort(aValue: Integer);
+begin
+  fLock.Enter;
+  try
+    fPort:=aValue;
+  finally
+  fLock.Leave;
+  end;
+end;
+
+//get it..
+function TDiscoveryThread.GetPort:integer;
+begin
+fLock.Enter;
+try
+   result:=fPort;
+finally
+fLock.Leave;
+end;
+
+
+end;
+
+//server ip client should connect too..
+procedure TDiscoveryThread.SetServerIp(aValue:String);
+begin
+  fLock.Enter;
+  try
+    fSrvIp:=aValue;
+  finally
+  fLock.Leave;
+
+  end;
+
+
+end;
+
+
+//get it..
+function TDiscoveryThread.GetServerIP:String;
+begin
+fLock.Enter;
+try
+  result:=fSrvIP;
+finally
+fLock.Leave;
+end;
+
+end;
+
+
+//the server port we connect too..
+procedure TDiscoveryThread.SetServerPort(aValue: Integer);
+begin
+  fLock.Enter;
+  try
+    fSrvPort:=aValue;
+  finally
+   fLock.Leave;
+  end;
+
+end;
+
+//get it
+function TDiscoveryThread.GetServerPort;
+begin
+  fLock.Enter;
+  try
+    result:=fSrvPort;
+  finally
+  fLock.Leave;
+
+  end;
+end;
+
+//server name we listen for.. set this!! :)
+procedure TDiscoveryThread.SetServerName(aValue: string);
+begin
+  fLock.Enter;
+  try
+    fSrvName:=aValue;
+  finally
+   fLock.Leave;
+  end;
+end;
+
+//get it..
+function TDiscoveryThread.GetServerName:string;
+begin
+fLock.Enter;
+try
+  result:=fSrvName;
+finally
+fLock.Leave;
+end;
+
+end;
+
+//just chill..
+procedure TDiscoveryThread.SetPause(const aValue: Boolean);
+begin
+  fLock.Enter;
+  try
+  if (not Terminated) and (fPaused <> aValue) then
+  begin
+    fPaused := aValue;
+    if fPaused then
+    begin
+      fPauseEvent.ResetEvent;
+      fUdp.Active:=false;
+      end else
+        begin
+         fPauseEvent.SetEvent;
+         fUdp.Active:=true;
+        end;
+  end;
+
+  finally
+    fLock.Leave;
+  end;
+
+end;
+
+//get it
+function TDiscoveryThread.GetPause:boolean;
+begin
+fLock.Enter;
+try
+  result:=fPaused;
+
+finally
+  fLock.Leave;
+end;
+
+end;
+
+
+// oops!!
+procedure TDiscoveryThread.DoErrorMsg;
+begin
+  if Assigned(fErrorEvent) then
+       fErrorEvent(self,fLastError);
+end;
+
+
+
+
+//does it match our packet identifier
+function TDiscoveryThread.CheckPacketIdent(Const AIdent:TIdentArray):boolean;
+var
+i:integer;
+begin
+   Result:=true;
+     for I := Low(aIdent) to High(AIdent) do
+       if AIdent[i]<>Ident_Packet[i] then result:=false;
+end;
+
+
+
+
+//convert from byte array to string, missing me short strings.. :)
+function TDiscoveryThread.BytesToStr(const aBytes:Array of byte):string;
+begin
+    result:='';
+    result:=tEncoding.ASCII.GetString(aBytes);
+end;
+
+
+
+//don't do much in here.. wait for pause or wait for packet received
+procedure TDiscoveryThread.Execute;
+begin
+
+while not Terminated do
+   begin
+      try
+
+       if Terminated then exit;
+       fPauseEvent.WaitFor(INFINITE);//pause
+       if Terminated then exit;
+       fDiscvEvent.WaitFor(1000);//wait for 1 sec
+       inc(fCount);
+       if fCount>9 then
+         begin
+           fCount:=0;
+           Burp;
+         end;
+       if Terminated then exit;
+       if not Terminated then fDiscvEvent.ResetEvent;
+
+      finally
+       ;
+      end;
+
+   end;
+
+end;
+
+
+procedure TDiscoveryThread.OnUDPError(AThread: TIdUDPListenerThread; ABinding: TIdSocketHandle; const AMessage: string; const AExceptionClass: TClass);
+begin
+   fLastError:=aMessage;
+   Synchronize(DoErrorMsg);
+end;
+
+
+
+
+{ Packet Context}
+
+
 
 
 Constructor tPacketContext.Create;
@@ -272,6 +741,8 @@ Constructor tPacketServer.Create;
 begin
   Inherited;
    fCrit:=tCriticalSection.Create;
+   fLogQue:=tQueue<string>.Create;
+   fErrorQue:=tQueue<string>.Create;
    fSent:=0;
    fRecv:=0;
    fBad:=0;
@@ -282,19 +753,118 @@ begin
    fServer.OnStatus:=OnStatus;
    fServer.OnException:=OnException;
    fServer.OnExecute:=OnExecute;
+
+  //create our discovery thread
+  fDiscvThrd:=TDiscoveryThread.Create(fCrit);
+//  fDiscvThrd.OnDiscovery:=DiscvRecvd;
+//  fDiscvThrd.OnError:=DiscvError;
+
+
+
+  {$IFDEF ANDROID}
+  fWifiLockEngaged:=false;
+  GetWifiLock;
+  {$ENDIF}
 end;
 
 Destructor tPacketServer.Destroy;
 begin
 if fServer.Active then
       fServer.Active:=false;
+
+   //kill discovery thread
+   if fDiscvThrd<>nil then
+     begin
+       fDiscvThrd.Free;//bye
+     end;
+
+
+fLogQue.Free;
+fErrorQue.Free;
 fCrit.Free;
+
+//release the lock
+ {$IFDEF ANDROID}
+ ReleaseWifiLock;
+ {$ENDIF}
+
+
+
 try
 fServer.Free;
 finally
 Inherited;
 end;
 end;
+
+
+
+
+{$IFDEF ANDROID}
+//get the manager in charge of things..
+function tPacketServer.GetWiFiManager: JWiFiManager;
+var
+  Obj: JObject;
+begin
+  result:=nil;
+  if fWifiLockEngaged then exit;//don't want another
+  //
+  Obj := SharedActivityContext.getSystemService(TJContext.JavaClass.WIFI_SERVICE);
+  if  Assigned(Obj) then// i know you are..
+  Result := TJWiFiManager.Wrap((Obj as ILocalObject).GetObjectID);//that's what i need..
+end;
+
+//get the lock, allows for receiving broadcast packets..
+procedure tPacketServer.GetWifiLock;
+var
+  info: JWiFiInfo;
+  ip: string;
+  lw:LongWord;
+begin
+ if fWifiLockEngaged then exit;//nothing to do here
+try
+fWifiManager :=GetWifiManager;
+//could a nil, so check her..
+  if Assigned(fWifiManager) then
+   begin
+   fMultiCastLock :=fWifiManager.createMulticastLock(StringToJString('IndysAwesome'));
+   fMultiCastLock.acquire;
+   fWifiLockEngaged:=true;
+    info := fWifiManager.getConnectionInfo;
+    lw:=info.getIpAddress;
+    lw:=SwapBytes(lw);
+    ip := MakeDWordIntoIPv4Address(lw);
+    fIp:=ip;
+
+  end;
+ Except on e:Exception do;//holy shits not working.. :)
+ end;//try
+end;
+
+//Release the lock when down..
+procedure tPacketServer.ReleaseWifiLock;
+begin
+try
+   //check the manager
+  if Assigned(fWifiManager) then
+   begin
+    //check the lock
+   If Assigned(fMultiCastLock) then
+       if fMultiCastLock.isHeld then //are we still held..
+               fMultiCastLock.Release;//bye
+
+  end;
+  Except on e:Exception do;//this will never happen right.. :)
+  end;// try
+end;
+
+
+{$ENDIF}
+
+
+
+
+
 
 function tPacketServer.IsOnline: Boolean;
 begin
@@ -374,11 +944,52 @@ begin
 end;
 
 
+procedure tPacketServer.Log(aMsg:String);
+begin
+
+//que up log message
+fCrit.Enter;
+try
+fLogQue.Enqueue(aMsg);
+finally
+fCrit.Leave;
+end;
+
+ //trigger event
+  TThread.Queue(nil,
+        procedure
+        begin
+          PacketSrv.DoLog;
+        end);
+
+end;
+
+procedure tPacketServer.LogError(aMsg:String);
+begin
+
+//que up log message
+fCrit.Enter;
+try
+fErrorQue.Enqueue(aMsg);
+finally
+fCrit.Leave;
+end;
+
+ //trigger event
+  TThread.Queue(nil,
+        procedure
+        begin
+          PacketSrv.DoError;
+        end);
+
+end;
+
 
 
 procedure tPacketServer.OnConnect(AContext: TIdContext);
 begin
   AContext.Data:=tPacketContext.Create;
+  Log('New connection from ip:'+AContext.Binding.PeerIP);
 end;
 
 procedure tPacketServer.OnContextCreated(AContext: TIdContext);
@@ -390,28 +1001,68 @@ procedure tPacketServer.OnDisconnect(AContext: TIdContext);
 begin
   AContext.Data.Free;
   AContext.Data:=nil;
+  Log('Disconnect ip:'+aContext.Binding.PeerIP);
 end;
 
 procedure tPacketServer.OnStatus(ASender: TObject; const AStatus: TIdStatus; const AStatusText: string);
 begin
   //
+  fLastStatus:=AStatusText;
+  TThread.Queue(nil,
+        procedure
+        begin
+          PacketSrv.DoStatus;
+        end);
+
+
 end;
 
 procedure tPacketServer.OnException(AContext: TIdContext; AException: Exception);
 begin
   //
-  fLastError:=AException.Message;
-  TThread.Queue(nil,
-        procedure
-        begin
-          PacketSrv.DoError;
-        end);
+
+  LogError(aException.Message);
+
 end;
 
 procedure tPacketServer.DoError;
 begin
 
-   if assigned(fCommsError) then fCommsError(nil,fLastError);
+   if assigned(fCommsError) then fCommsError(nil);
+end;
+
+procedure tPacketServer.DoStatus;
+begin
+  if assigned(fStatus) then fStatus(nil,fLastStatus);
+end;
+
+procedure tPacketServer.DoLog;
+begin
+  if assigned(fLogEvent) then fLogEvent(nil);
+end;
+
+function tPacketServer.PopLog: string;
+begin
+  fCrit.Enter;
+  try
+   result:='';
+   if fLogQue.Count>0 then
+     result:=fLogQue.Dequeue;
+  finally
+   fCrit.Leave;
+  end;
+end;
+
+function tPacketServer.PopErrorLog: string;
+begin
+  fCrit.Enter;
+  try
+   result:='';
+   if fErrorQue.Count>0 then
+     result:=fErrorQue.Dequeue;
+  finally
+   fCrit.Leave;
+  end;
 end;
 
 procedure tPacketServer.OnExecute(AContext: TIdContext);
@@ -485,6 +1136,7 @@ if Assigned(aPacketCxt) then
                        IncBad;
                        SetLength(aPacketCxt.fBuff,0);
                        SetLength(aBuff,0);
+                       Log('Bad Data Buffer Size '+aContext.Binding.PeerIP);
                      end;
                 end
                   else
@@ -500,6 +1152,7 @@ if Assigned(aPacketCxt) then
                  SetLength(aPacketCxt.fBuff,0);
                  SetLength(aBuff,0);
                  IncBad;
+                 Log('Bad Ident Recvd '+aContext.Binding.PeerIP);
                end;
          end else
            begin
@@ -507,6 +1160,7 @@ if Assigned(aPacketCxt) then
              SetLength(aPacketCxt.fBuff,0);
              SetLength(aBuff,0);
              IncBad;
+             Log('Bad Header Buffer Size '+aContext.Binding.PeerIP);
            end;
        end;
 
@@ -529,6 +1183,8 @@ end;
 procedure tPacketServer.piRecvPacket(aPacket: tPacketContext);
 begin
   //process incoming packets, do a case on the incoming commands
+  Log('Processing Packet Command:'+IntToStr(aPacket.fHdr.Command)+' from ip:'+aPacket.Context.Binding.PeerIP);
+
   case aPacket.fHdr.Command of
   CMD_NOP:piRecvNOP(aPacket);
   end;

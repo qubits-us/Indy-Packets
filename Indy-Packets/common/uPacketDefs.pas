@@ -26,8 +26,21 @@ type
   DataSize:integer;//4 bytes -addional data size after header and not including header..
 end;
 
+
+    //udp discovery packets broadcast from server..
+  type
+     pDiscoveryPacket=^tDiscoveryPacket;
+     tDiscoveryPacket =packed record
+       PacketIdent:TIdentArray;
+       ServerName :array[0..25] of byte;
+       ServerIp   :array[0..13] of byte;
+       ServerPort :array[0..13] of byte;
+     end;
+
+
 function CheckPacketIdent(Const AIdent:TIdentArray):boolean;
 procedure FillPacketIdent(var aIdent:tIdentArray);
+function SwapBytes(Value: LongWord): LongWord;
 
 
 
@@ -53,6 +66,17 @@ begin
 
 end;
 
+
+function SwapBytes(Value: LongWord): LongWord;
+type
+  Bytes = packed array[0..3] of Byte;
+
+begin
+  Bytes(Result)[0]:= Bytes(Value)[3];
+  Bytes(Result)[1]:= Bytes(Value)[2];
+  Bytes(Result)[2]:= Bytes(Value)[1];
+  Bytes(Result)[3]:= Bytes(Value)[0];
+end;
 
 
 
