@@ -1,3 +1,12 @@
+{ Indy Packet Server
+
+ came to life.. 3.12.22 -q
+
+
+ be it harm none, do as ye wish..
+
+
+  }
 unit uIndyPacketServer;
 
 interface
@@ -86,7 +95,7 @@ type
 
 
 
-
+  //Packet context object, each connection gets one..
   type
     tPacketContext = Class(tObject)
       private
@@ -115,6 +124,7 @@ type
        property PacketsDrop:integer read GetDrop;
     End;
 
+  // the server object
 
   type
      tPacketServer = Class(tObject)
@@ -188,6 +198,7 @@ type
 
      End;
 
+   //global server object..
   var
     PacketSrv:tPacketServer;
 
@@ -203,7 +214,7 @@ begin
   fLock:=aLock;
   fPaused:=true;
   fPort:=6000;
-  fSrvIP:='192.168.0.55';
+  fSrvIP:='127.0.0.1';
   fSrvPort:=9000;
   fSrvName:='SRV1';
   fBurp:=false;
@@ -714,7 +725,7 @@ begin
    i:=GetOutGoing;
    if i>0 then
      begin
-       //send outgoing packets
+       //send a que'd outgoing packet
        aPack:=Pop;
        s:=Length(aPack.Data);
        if s>0 then
@@ -730,6 +741,8 @@ begin
      end;
 
 end;
+
+
 
 {
  Indy Packet Server
@@ -756,8 +769,6 @@ begin
 
   //create our discovery thread
   fDiscvThrd:=TDiscoveryThread.Create(fCrit);
-//  fDiscvThrd.OnDiscovery:=DiscvRecvd;
-//  fDiscvThrd.OnError:=DiscvError;
 
 
 
@@ -778,7 +789,6 @@ if fServer.Active then
        fDiscvThrd.Free;//bye
      end;
 
-
 fLogQue.Free;
 fErrorQue.Free;
 fCrit.Free;
@@ -788,13 +798,11 @@ fCrit.Free;
  ReleaseWifiLock;
  {$ENDIF}
 
-
-
-try
-fServer.Free;
-finally
-Inherited;
-end;
+ try
+  fServer.Free;
+   finally
+    Inherited;
+ end;
 end;
 
 
@@ -810,8 +818,8 @@ begin
   if fWifiLockEngaged then exit;//don't want another
   //
   Obj := SharedActivityContext.getSystemService(TJContext.JavaClass.WIFI_SERVICE);
-  if  Assigned(Obj) then// i know you are..
-  Result := TJWiFiManager.Wrap((Obj as ILocalObject).GetObjectID);//that's what i need..
+  if  Assigned(Obj) then
+  Result := TJWiFiManager.Wrap((Obj as ILocalObject).GetObjectID);
 end;
 
 //get the lock, allows for receiving broadcast packets..
@@ -837,7 +845,7 @@ fWifiManager :=GetWifiManager;
     fIp:=ip;
 
   end;
- Except on e:Exception do;//holy shits not working.. :)
+ Except on e:Exception do;
  end;//try
 end;
 
@@ -878,7 +886,7 @@ end;
 
 function tPacketServer.GetBad: Integer;
 begin
-     fCrit.Enter;
+  fCrit.Enter;
    try
    result:=fBad;
    finally
@@ -889,7 +897,7 @@ end;
 
 procedure tPacketServer.IncBad;
 begin
-     fCrit.Enter;
+  fCrit.Enter;
    try
    Inc(fBad);
    finally
