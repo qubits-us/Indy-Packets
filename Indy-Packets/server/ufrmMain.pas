@@ -22,6 +22,8 @@ type
     memLog: TMemo;
     edPort: TEdit;
     Label1: TLabel;
+    Button3: TButton;
+    Button4: TButton;
     procedure FormCreate(Sender: TObject);
     procedure FormClose(Sender: TObject; var Action: TCloseAction);
     procedure Button1Click(Sender: TObject);
@@ -29,6 +31,8 @@ type
     procedure OnStatus(sender:tObject;const aStatus:string);
     procedure OnLog(sender:tObject);
     procedure OnError(sender:tObject);
+    procedure Button3Click(Sender: TObject);
+    procedure Button4Click(Sender: TObject);
   private
     { Private declarations }
   public
@@ -44,16 +48,29 @@ implementation
 
 procedure TMainFrm.Button1Click(Sender: TObject);
 begin
+if PacketSrv.Online then exit;//nop
+
 PacketSrv.Start;
 
 memLog.Lines.Strings[0]:='Server Active '+PacketSrv.IP;
-//memLog.Lines.Insert(0,'Server Active '+PacketSrv.IP);
 end;
 
 procedure TMainFrm.Button2Click(Sender: TObject);
 begin
+if not PacketSrv.Online then exit;//nop
+
 PacketSrv.Stop;
 memLog.Lines.Strings[0]:='Server Stopped';
+end;
+
+procedure TMainFrm.Button3Click(Sender: TObject);
+begin
+PacketSrv.DiscoveryEnabled:=true;
+end;
+
+procedure TMainFrm.Button4Click(Sender: TObject);
+begin
+PacketSrv.DiscoveryEnabled:=false;
 end;
 
 procedure TMainFrm.FormClose(Sender: TObject; var Action: TCloseAction);
@@ -72,21 +89,22 @@ begin
 //
 ReportMemoryLeaksOnShutDown:=true;
 PacketSrv:=tPacketServer.Create;
-//Android - GStack doesn't give us what we want..
-
-{$IFDEF WINDOWS}
+//Windows - use GStack.LocalAddress seems to give correct ip..
+{$IFDEF MSWINDOWS}
 PacketSrv.IP:=GStack.LocalAddress;
 IPs:=GStack.LocalAddresses;
 for I := 0 to IPs.Count-1 do
   memLog.Lines.Insert(0,IPs.Strings[i]);
 {$ENDIF}
-
+//Android - GStack doesn't give us what we want..
+// pulling ip out of wifimanager when aquiring the multicast lock..
 {$IFDEF ANDROID}
 ip:=PacketSrv.IP;
 memLog.Lines.Insert(0,'Server IP: '+ip);
 {$ENDIF}
 
 PacketSrv.Port:=9000;
+PacketSrv.ServerName:='SRV1';
 PacketSrv.OnState:=OnStatus;
 PacketSrv.OnLog:=OnLog;
 PacketSrv.OnError:=OnError;
@@ -97,7 +115,7 @@ end;
 
 procedure TMainFrm.OnStatus(Sender:tObject;const aStatus: string);
 begin
-  memLog.Lines.Insert(1,aStatus);
+  memLog.Lines.Insert(1,'Status Change: '+aStatus);
 end;
 
 procedure tMainFrm.OnLog(sender: TObject);

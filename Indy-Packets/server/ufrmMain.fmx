@@ -52,4 +52,18 @@ object MainFrm: TMainFrm
     Text = 'Port'
     TabOrder = 5
   end
+  object Button3: TButton
+    Position.X = 216.000000000000000000
+    Position.Y = 312.000000000000000000
+    TabOrder = 6
+    Text = 'En Discv'
+    OnClick = Button3Click
+  end
+  object Button4: TButton
+    Position.X = 312.000000000000000000
+    Position.Y = 312.000000000000000000
+    TabOrder = 7
+    Text = 'Dis Discv'
+    OnClick = Button4Click
+  end
 end
