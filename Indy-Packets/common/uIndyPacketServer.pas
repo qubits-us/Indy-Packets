@@ -60,8 +60,6 @@ type
             procedure SetDiscvSent(aValue:integer);
             function  GetDiscvSent:integer;
             procedure IncDiscvSent;
-            function  GetBurp:boolean;
-            procedure SetBurp(aValue:boolean);
             function  GetPort:integer;
             procedure SetPort(aValue:integer);
             procedure SetPause(const aValue:Boolean);
@@ -89,7 +87,6 @@ type
              property    ServerPort:integer read GetServerPort;
              property    ServerIP:string read GetServerIP;
              property    ServerName:String read GetServerName write SetServerName;
-             property    DoBurp:boolean read GetBurp write SetBurp;
              property    DiscvSent:integer read GetDiscvSent;
       end;
 
@@ -133,13 +130,14 @@ type
         fLogQue:tQueue<string>;
         fErrorQue:tQueue<string>;
         fServer: TIdTCPServer;
+        fServerName:String;
         fIp:string;
-        fLastError:string;
-        fLastStatus:string;
         fPort:integer;
+        fDiscvPort:integer;
         fRecv:integer;
         fSent:integer;
         fBad:integer;
+        fDiscoveryEnabled:boolean;
         fCommsError:TComms_event;
         fStatus:tComms_Status;
         fLogEvent:tComms_event;
@@ -160,6 +158,9 @@ type
         procedure IncSent;
         function  GetRecv:integer;
         procedure IncRecv;
+        procedure SetServerName(aValue:string);
+        procedure SetDiscovery(aValue:boolean);
+        procedure SetDiscoveryPort(aValue:integer);
         procedure Log(aMsg:String);
         procedure LogError(aMsg:String);
         procedure OnConnect(AContext: TIdContext);
@@ -174,11 +175,12 @@ type
         function  IsOnline:boolean;
 
 
+
        public
         Constructor Create;
         Destructor  Destroy;override;
         procedure   DoError;
-        procedure   DoStatus;
+        procedure   DoStatus(aStatus:string);
         procedure   DoLog;
         function    PopLog:string;
         function    PopErrorLog:string;
@@ -189,8 +191,11 @@ type
         property OnState:tComms_Status read fStatus write fStatus;
         property OnLog:tComms_event read fLogEvent write fLogEvent;
         property Port:integer read fPort write fPort;
+        property DiscvPort:integer read fDiscvPort write SetDiscoveryPort;
         property IP:string read fIP write fIP;
         property Online:boolean read IsOnline;
+        property ServerName:String read fServerName write SetServerName;
+        property DiscoveryEnabled:boolean read fDiscoveryEnabled write SetDiscovery;
         property Connections:integer read GetConnCount;
         property PacketsRecv:integer read GetRecv;
         property PacketsSent:integer read GetSent;
@@ -213,7 +218,7 @@ constructor TDiscoveryThread.Create(aLock: TCriticalSection);
 begin
   fLock:=aLock;
   fPaused:=true;
-  fPort:=6000;
+  fPort:=6001;//port should be one port above what clients listen on..
   fSrvIP:='127.0.0.1';
   fSrvPort:=9000;
   fSrvName:='SRV1';
@@ -293,8 +298,9 @@ begin
    //take me struct and stuff it into an indy buff..
    SetLength(aBuff,SizeOf(aPacket));
    Move(aPacket,aBuff[0],SizeOf(aPacket));
+ //our broadcast port is 1 less than default..
  try
-  fUdp.Broadcast(aBuff,fUdp.DefaultPort);
+  fUdp.Broadcast(aBuff,fUdp.DefaultPort-1);
   IncDiscvSent;
   except on e:Exception do
     begin
@@ -303,32 +309,6 @@ begin
     end;
  end;
   SetLength(aBuff,0);//bye
-end;
-
-//do we burp out a broadcast packet when active set to true..
-//might open things up if stuck.. don't seem to need it..
-procedure TDiscoveryThread.SetBurp(aValue: Boolean);
-begin
-  fLock.Enter;
-  try
-    fBurp:=aValue;
-  finally
-  fLock.Leave;
-
-  end;
-end;
-
-//get the burp
-function TDiscoveryThread.GetBurp:boolean;
-begin
-fLock.Enter;
-try
-    result:=fBurp;
-finally
-fLock.Leave;
-
-end;
-
 end;
 
 
@@ -759,6 +739,7 @@ begin
    fSent:=0;
    fRecv:=0;
    fBad:=0;
+   fIp:='127.0.0.1';
    fServer:=tIdTCPServer.Create(nil);
    fServer.OnConnect:=OnConnect;
    fServer.OnContextCreated:=OnContextCreated;
@@ -769,7 +750,6 @@ begin
 
   //create our discovery thread
   fDiscvThrd:=TDiscoveryThread.Create(fCrit);
-
 
 
   {$IFDEF ANDROID}
@@ -827,12 +807,12 @@ procedure tPacketServer.GetWifiLock;
 var
   info: JWiFiInfo;
   ip: string;
-  lw:LongWord;
+  lw:longword;
 begin
  if fWifiLockEngaged then exit;//nothing to do here
 try
 fWifiManager :=GetWifiManager;
-//could a nil, so check her..
+//could be a nil, so check..
   if Assigned(fWifiManager) then
    begin
    fMultiCastLock :=fWifiManager.createMulticastLock(StringToJString('IndysAwesome'));
@@ -840,10 +820,10 @@ fWifiManager :=GetWifiManager;
    fWifiLockEngaged:=true;
     info := fWifiManager.getConnectionInfo;
     lw:=info.getIpAddress;
-    lw:=SwapBytes(lw);
-    ip := MakeDWordIntoIPv4Address(lw);
-    fIp:=ip;
-
+    lw:=SwapBytes(lw);//swap the byte order, backwards on robots..
+    ip := MakeUInt32IntoIPv4Address(lw);
+    fIp:=ip;//save it
+    fDiscvThrd.ServerIP:=fip;//set for our udp discv
   end;
  Except on e:Exception do;
  end;//try
@@ -951,6 +931,32 @@ begin
 
 end;
 
+procedure tPacketServer.SetServerName(aValue: string);
+begin
+  fServerName:=aValue;
+  fDiscvThrd.ServerName:=fServerName;
+end;
+
+//start and stop the discovery thread..
+procedure tPacketServer.SetDiscovery(aValue: Boolean);
+begin
+  if aValue then fDiscvThrd.Paused:=false else
+      fDiscvThrd.Paused:=true;
+end;
+
+//this will be the port we send out on..
+//adding one to it, as we bind one port above..
+//this allows running client and server on same cpu..
+//server only transmits..
+procedure tPacketServer.SetDiscoveryPort(aValue: Integer);
+begin
+    if aValue<>fDiscvPort then
+      begin
+      fDiscvPort:=aValue;
+      fDiscvThrd.Port:=aValue+1;
+      end;
+end;
+
 
 procedure tPacketServer.Log(aMsg:String);
 begin
@@ -967,6 +973,7 @@ end;
   TThread.Queue(nil,
         procedure
         begin
+         if Assigned(PacketSrv) then
           PacketSrv.DoLog;
         end);
 
@@ -987,6 +994,7 @@ end;
   TThread.Queue(nil,
         procedure
         begin
+         if Assigned(PacketSrv) then
           PacketSrv.DoError;
         end);
 
@@ -1014,15 +1022,8 @@ end;
 
 procedure tPacketServer.OnStatus(ASender: TObject; const AStatus: TIdStatus; const AStatusText: string);
 begin
-  //
-  fLastStatus:=AStatusText;
-  TThread.Queue(nil,
-        procedure
-        begin
-          PacketSrv.DoStatus;
-        end);
-
-
+//
+ DoStatus(aStatusText);
 end;
 
 procedure tPacketServer.OnException(AContext: TIdContext; AException: Exception);
@@ -1039,9 +1040,9 @@ begin
    if assigned(fCommsError) then fCommsError(nil);
 end;
 
-procedure tPacketServer.DoStatus;
+procedure tPacketServer.DoStatus(aStatus:string);
 begin
-  if assigned(fStatus) then fStatus(nil,fLastStatus);
+  if assigned(fStatus) then fStatus(nil,aStatus);
 end;
 
 procedure tPacketServer.DoLog;
